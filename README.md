@@ -47,7 +47,7 @@ uvicorn app.main:app --port 8000
   "confidence": "high",
   "fallback_reason": null,
   "trace_id": "550e8400-e29b-41d4-a716-446655440000",
-  "latency_ms": 920
+  "latency_ms": 18500
 }
 ```
 
@@ -131,7 +131,7 @@ Fallback відповідь повертається у тому самому JS
   "answer": "...",
   "confidence": "high",
   "fallback_reason": null,
-  "latency_ms": 1240,
+  "latency_ms": 19200,
   "errors": []
 }
 ```
@@ -200,7 +200,7 @@ POST /ask
   "confidence": "medium",
   "fallback_reason": null,
   "trace_id": "...",
-  "latency_ms": 2800
+  "latency_ms": 15000
 }
 ```
 
@@ -216,7 +216,7 @@ POST /ask
   "confidence": "low",
   "fallback_reason": "Релевантний контекст не знайдено в базі знань",
   "trace_id": "...",
-  "latency_ms": 800
+  "latency_ms": 1400
 }
 ```
 
@@ -234,7 +234,7 @@ POST /ask
   "confidence": "low",
   "fallback_reason": null,
   "trace_id": "...",
-  "latency_ms": 3200
+  "latency_ms": 22000
 }
 ```
 
@@ -250,7 +250,7 @@ POST /ask
   "confidence": "low",
   "fallback_reason": null,
   "trace_id": "...",
-  "latency_ms": 3000
+  "latency_ms": 18000
 }
 ```
 
@@ -266,7 +266,7 @@ POST /ask
   "confidence": "low",
   "fallback_reason": null,
   "trace_id": "...",
-  "latency_ms": 2600
+  "latency_ms": 16000
 }
 ```
 
@@ -282,13 +282,18 @@ POST /ask
 | **Jina Reranker v3** | ТЗ не вимагає — додано як precision layer, безпосередньо впливає на якість `confidence` і релевантність `sources` |
 | **`scripts/evaluate.py`** | ТЗ вимагає тільки звіт — автоматичний скрипт дозволяє швидко перевірити pipeline після будь-яких змін |
 | **GET /health** | Production monitoring, load balancer health checks, CI/CD |
+| **Shared `httpx.AsyncClient`** | TCP/TLS connection reuse між запитами до Jina AI і OpenRouter — усуває handshake overhead (~300-500ms на запит) |
+| **Async trace write** | `traces.jsonl` пишеться у фоновому `asyncio.Task` через `asyncio.to_thread` — файловий I/O не блокує response |
+
+### Latency
+
+Реальний час відповіді: **15–35s** на запит. Домінуючий фактор — генерація DeepSeek через OpenRouter (~10-25s). Jina Embedding + Reranker додають ще ~3-8s. Це не проблема коду, а характеристика hosted AI APIs без кешування.
 
 ### Пропонується для наступних ітерацій
 
-- **SSE Streaming** — `POST /ask/stream` повертає відповідь токен за токеном. Знижує perceived latency з ~3s до <300ms TTFB. Не реалізовано: конфліктує з вимогою ТЗ про цілісний JSON об'єкт у відповіді
-- **Per-request embedding caching** — при cosine similarity > 0.95 між новим і кешованим запитом повертати попередній результат без Jina API call. Зменшує latency і витрати
-- **Response caching** — LRU cache для повторних однакових питань (Redis з TTL=1h). Нема сенсу двічі звертатись до LLM з тим самим запитом
-- **Async trace writing** — винести запис у `traces.jsonl` у фоновий task щоб не блокувати response
+- **Response caching** — LRU cache для повторних однакових питань (Redis з TTL=1h). Найбільший win по latency: повторний запит → миттєва відповідь без жодного API call
+- **Per-request embedding caching** — при cosine similarity > 0.95 між новим і кешованим запитом повертати попередній результат без Jina API call
+- **SSE Streaming** — `POST /ask/stream` повертає відповідь токен за токеном. Знижує perceived latency з ~20s до <300ms TTFB. Не реалізовано: конфліктує з вимогою ТЗ про цілісний JSON об'єкт у відповіді
 - **Auth middleware** — API key validation через header для production
 - **Docker** — Dockerfile + docker-compose для ізольованого відтворюваного запуску
 - **Prometheus metrics** — кількість запитів, latency percentiles (p50/p95/p99), fallback rate
