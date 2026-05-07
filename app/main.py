@@ -3,6 +3,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 
 load_dotenv()
 
@@ -20,6 +21,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="AI Consultant API", version="1.0.0", lifespan=lifespan)
+
+
+@app.get("/", include_in_schema=False)
+async def root() -> RedirectResponse:
+    return RedirectResponse(url="/docs")
 
 
 @app.post("/ask", response_model=AskResponse)
