@@ -1,0 +1,30 @@
+# Environment (sensitive keys — share .env directly with reviewers)
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Runtime artifacts
+traces.jsonl
+evaluation_results.json
+
+# Planning & specs (internal tooling files — never commit)
+docs/
+specs/
+plans/
+.claude/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
