@@ -291,6 +291,20 @@ POST /ask
 
 ### Пропонується для наступних ітерацій
 
+**Зміна AI-провайдерів для production-рівня latency:**
+
+Поточний стек (DeepSeek via OpenRouter + Jina Embeddings + Jina Reranker) обрано для демонстрації функціоналу з мінімальними витратами. Для production рекомендується:
+
+| Компонент | Зараз (demo) | Production |
+|---|---|---|
+| **LLM** | DeepSeek via OpenRouter (~10-25s) | [Groq](https://groq.com) `compound-beta` (~0.5-2s, LPU-чіпи, OpenAI-сумісний API) або [OpenAI](https://platform.openai.com) `gpt-4o-mini` (~1-3s) — обидва дають якість значно вищу за DeepSeek при суттєво нижчій latency |
+| **Embeddings** | Jina Embeddings v3 (~1-2s) | [OpenAI `text-embedding-3-small`](https://platform.openai.com/docs/guides/embeddings) (~100-200ms) — швидше, дешевше, висока якість |
+| **Reranker** | Jina Reranker v3 (~1-3s) | [Cohere Rerank](https://cohere.com/rerank) (~200-400ms) — швидший, з підтримкою багатомовності |
+
+Перехід з поточного стеку на production потребує зміни лише `.env` та URL в конфігурації — архітектура pipeline залишається незмінною.
+
+**Очікуваний результат:** загальна latency ~2-5s замість 15-35s.
+
 - **Response caching** — LRU cache для повторних однакових питань (Redis з TTL=1h). Найбільший win по latency: повторний запит → миттєва відповідь без жодного API call
 - **Per-request embedding caching** — при cosine similarity > 0.95 між новим і кешованим запитом повертати попередній результат без Jina API call
 - **SSE Streaming** — `POST /ask/stream` повертає відповідь токен за токеном. Знижує perceived latency з ~20s до <300ms TTFB. Не реалізовано: конфліктує з вимогою ТЗ про цілісний JSON об'єкт у відповіді
