@@ -1,3 +1,4 @@
+import asyncio
 import os
 from pathlib import Path
 from typing import Optional
@@ -16,6 +17,7 @@ TOP_K = int(os.getenv("RETRIEVAL_TOP_K", "5"))
 TOP_N = int(os.getenv("RERANKER_TOP_N", "3"))
 
 _retriever: Optional[HybridRetriever] = None
+_http_client: Optional[httpx.AsyncClient] = None
 
 
 def _get_retriever() -> HybridRetriever:
@@ -34,37 +36,11 @@ def _confidence(score: float, is_fallback: bool) -> str:
     return "low"
 
 
-async def _embed_passages(texts: list[str], api_key: str) -> list[list[float]]:
+async def _embed_passages(texts: list[str], api_key: str, client: httpx.AsyncClient) -> list[list[float]]:
     batch_size = 100
     all_embeddings: list[list[float]] = []
-    async with httpx.AsyncClient(timeout=60) as client:
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i : i + batch_size]
-            resp = await client.post(
-                "https://api.jina.ai/v1/embeddings",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json",
-                },
-                json={
-                    "model": "jina-embeddings-v3",
-                    "input": batch,
-                    "task": "retrieval.passage",
-                    "dimensions": 1024,
-                    "normalized": True,
-                    "embedding_type": "float",
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            sorted_data = sorted(data["data"], key=lambda x: x["index"])
-            all_embeddings.extend(d["embedding"] for d in sorted_data)
-    return all_embeddings
-
-
-async def _embed_query(query: str, api_key: str) -> Optional[list[float]]:
-    async with httpx.AsyncClient(timeout=30) as client:
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i : i + batch_size]
         resp = await client.post(
             "https://api.jina.ai/v1/embeddings",
             headers={
@@ -74,8 +50,8 @@ async def _embed_query(query: str, api_key: str) -> Optional[list[float]]:
             },
             json={
                 "model": "jina-embeddings-v3",
-                "input": [query],
-                "task": "retrieval.query",
+                "input": batch,
+                "task": "retrieval.passage",
                 "dimensions": 1024,
                 "normalized": True,
                 "embedding_type": "float",
@@ -83,26 +59,64 @@ async def _embed_query(query: str, api_key: str) -> Optional[list[float]]:
         )
         resp.raise_for_status()
         data = resp.json()
+        sorted_data = sorted(data["data"], key=lambda x: x["index"])
+        all_embeddings.extend(d["embedding"] for d in sorted_data)
+    return all_embeddings
+
+
+async def _embed_query(query: str, api_key: str, client: httpx.AsyncClient) -> Optional[list[float]]:
+    resp = await client.post(
+        "https://api.jina.ai/v1/embeddings",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        json={
+            "model": "jina-embeddings-v3",
+            "input": [query],
+            "task": "retrieval.query",
+            "dimensions": 1024,
+            "normalized": True,
+            "embedding_type": "float",
+        },
+    )
+    resp.raise_for_status()
+    data = resp.json()
     return data["data"][0]["embedding"]
 
 
 async def init_pipeline(kb_path: Path) -> int:
-    global _retriever
+    global _retriever, _http_client
+
+    _http_client = httpx.AsyncClient(
+        timeout=60,
+        limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+    )
+
     chunks = load_and_index(kb_path)
     retriever = HybridRetriever(chunks)
 
     api_key = os.getenv("JINA_API_KEY", "")
     if api_key:
-        embeddings = await _embed_passages([c.text for c in chunks], api_key)
+        embeddings = await _embed_passages([c.text for c in chunks], api_key, _http_client)
         retriever.set_embeddings(embeddings)
 
     _retriever = retriever
     return len(chunks)
 
 
+async def close_pipeline() -> None:
+    global _http_client
+    if _http_client is not None:
+        await _http_client.aclose()
+        _http_client = None
+
+
 async def process_question(question: str) -> AskResponse:
     trace: PipelineTrace = new_trace(question)
     retriever = _get_retriever()
+    client = _http_client
 
     # Stage 1: context loading
     trace.record_stage("context_loading", "completed", chunks_available=len(retriever.chunks))
@@ -112,8 +126,8 @@ async def process_question(question: str) -> AskResponse:
     candidates: list[tuple[Chunk, float]] = []
     try:
         api_key = os.getenv("JINA_API_KEY", "")
-        if api_key:
-            query_embedding = await _embed_query(question, api_key)
+        if api_key and client is not None:
+            query_embedding = await _embed_query(question, api_key, client)
         candidates = retriever.search(question, query_embedding, top_k=TOP_K)
         trace.record_stage(
             "retrieval",
@@ -128,7 +142,7 @@ async def process_question(question: str) -> AskResponse:
     reranked: list[tuple[Chunk, float]] = []
     top_score = 0.0
     try:
-        reranked = await rerank(question, candidates, top_n=TOP_N)
+        reranked = await rerank(question, candidates, top_n=TOP_N, client=client)
         top_score = reranked[0][1] if reranked else 0.0
         trace.record_stage(
             "reranking",
@@ -161,7 +175,7 @@ async def process_question(question: str) -> AskResponse:
             )
             trace.record_stage("llm_generation", "skipped", reason="fallback_triggered")
         else:
-            answer = await generate_answer(question, reranked)
+            answer = await generate_answer(question, reranked, client=client)
             trace.record_stage("llm_generation", "completed", answer_length=len(answer))
     except Exception as exc:
         trace.record_error("llm_generation", str(exc))
@@ -178,7 +192,9 @@ async def process_question(question: str) -> AskResponse:
     trace.confidence = confidence
     trace.fallback_reason = fallback_reason
     trace.finish()
-    trace.write()
+
+    # async trace write — does not block response
+    asyncio.create_task(asyncio.to_thread(trace.write))
 
     return AskResponse(
         answer=answer,

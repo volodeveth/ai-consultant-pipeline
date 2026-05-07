@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 
 import httpx
 
@@ -18,6 +19,7 @@ SYSTEM_PROMPT = """Ти AI-консультант з кадрових питан
 async def generate_answer(
     question: str,
     context_chunks: list[tuple],
+    client: Optional[httpx.AsyncClient] = None,
 ) -> str:
     api_key = os.getenv("OPENROUTER_API_KEY", "")
     model = os.getenv("OPENROUTER_MODEL", "deepseek/deepseek-chat")
@@ -34,23 +36,25 @@ async def generate_answer(
             "content": f"Контекст з бази знань:\n{context}\n\n---\n\nПитання: {question}",
         },
     ]
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.1,
+        "top_p": 0.9,
+        "max_tokens": 600,
+    }
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            OPENROUTER_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": messages,
-                "temperature": 0.1,
-                "top_p": 0.9,
-                "max_tokens": 1000,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    if client is not None:
+        resp = await client.post(OPENROUTER_URL, headers=headers, json=payload)
+    else:
+        async with httpx.AsyncClient(timeout=60) as c:
+            resp = await c.post(OPENROUTER_URL, headers=headers, json=payload)
+
+    resp.raise_for_status()
+    data = resp.json()
 
     return data["choices"][0]["message"]["content"].strip()

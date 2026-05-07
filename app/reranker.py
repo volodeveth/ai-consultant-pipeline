@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 
 import httpx
 
@@ -11,6 +12,7 @@ async def rerank(
     query: str,
     candidates: list[tuple[Chunk, float]],
     top_n: int = 3,
+    client: Optional[httpx.AsyncClient] = None,
 ) -> list[tuple[Chunk, float]]:
     if not candidates:
         return []
@@ -20,24 +22,26 @@ async def rerank(
         return candidates[:top_n]
 
     documents = [c.text for c, _ in candidates]
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    payload = {
+        "model": "jina-reranker-v3",
+        "query": query,
+        "documents": documents,
+        "top_n": top_n,
+    }
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            JINA_RERANK_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            json={
-                "model": "jina-reranker-v3",
-                "query": query,
-                "documents": documents,
-                "top_n": top_n,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    if client is not None:
+        resp = await client.post(JINA_RERANK_URL, headers=headers, json=payload)
+    else:
+        async with httpx.AsyncClient(timeout=30) as c:
+            resp = await c.post(JINA_RERANK_URL, headers=headers, json=payload)
+
+    resp.raise_for_status()
+    data = resp.json()
 
     return [
         (candidates[r["index"]][0], float(r["relevance_score"]))
